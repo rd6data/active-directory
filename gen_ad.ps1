@@ -1,57 +1,68 @@
 <# 
 .SYNOPSIS
-Create AD users from JSON or auto-generate N users for a lab.
-
-.EXAMPLES
-# Generate 25 random users into an OU, creating groups if missing
-.\LabUsers.ps1 -Domain example.local -OU "OU=Lab Users,DC=example,DC=local" `
-  -Count 25 -GroupNames "IT","HR","Finance","Sales" -CreateMissingGroups -Verbose
-
-# Create from JSON (schema below)
-.\LabUsers.ps1 -JSONFile .\users.json -Verbose
+Crear usuarios de AD desde JSON o generarlos dinámicamente para un lab.
 #>
 
 #requires -Version 5.1
 [CmdletBinding()]
 param(
-  # --- JSON mode ---
+  # --- Modo JSON ---
   [Parameter(ParameterSetName="json", Mandatory=$true)]
   [string] $JSONFile,
 
-  # --- Generator mode ---
+  # --- Modo Generador ---
   [Parameter(ParameterSetName="gen", Mandatory=$true)]
   [int] $Count,
 
   [Parameter(ParameterSetName="gen", Mandatory=$true)]
   [string] $Domain,
 
-  [Parameter(ParameterSetName="gen")]
-  [string] $OU = "OU=Lab Users,DC=example,DC=local",
-
-  [Parameter(ParameterSetName="gen")]
-  [string[]] $GroupNames = @("IT","HR","Finance","Sales"),
-
-  # --- Common ---
+  # --- Comunes ---
+  [string] $OU,                                # ahora usable en ambos modos
+  [string[]] $GroupNames,                      # opcional; si no se pasa, usa data\groupNames.txt
   [switch] $CreateMissingGroups,
   [switch] $WhatIf,
-  [Parameter()] [string] $OutputCsv = ".\created-users-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
+  [string] $OutputCsv = ".\created-users-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
 )
 
-# Load AD module
 Import-Module ActiveDirectory -ErrorAction Stop
 
-# Init CSV
+# Init CSV (encabezado simple)
 if (-not (Test-Path $OutputCsv)) {
   "Name,SamAccountName,UPN,DistinguishedName,TempPassword,Groups" | Out-File -Encoding UTF8 $OutputCsv
 }
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ---- Pools basados en archivos ------------------------------------------------
+# Carpeta de datos junto al script
+$dataDir    = Join-Path $PSScriptRoot 'data'
+$groupsFile = Join-Path $dataDir 'groupNames.txt'
+
+function Get-RandomGroups {
+  param(
+    [string[]] $Pool,
+    [int] $Min = 1,
+    [int] $Max = 3
+  )
+  if (-not $Pool -or $Pool.Count -eq 0) { return @() }
+  $cap = [Math]::Min($Max, $Pool.Count)
+  $n   = Get-Random -Minimum $Min -Maximum ($cap + 1)
+  if ($n -lt $Min) { $n = $Min }
+  $Pool | Get-Random -Count $n
+}
+
+# Cargar grupos desde data\groupNames.txt si existe
+if (Test-Path $groupsFile) {
+  $fileGroups = Get-Content $groupsFile | Where-Object { $_ -and $_.Trim() -ne '' } | ForEach-Object { $_.Trim() }
+} else {
+  $fileGroups = @()
+}
+
+# ---- Helpers -----------------------------------------------------------------
 function Ensure-ADGroup {
   param(
     [Parameter(Mandatory=$true)][string] $Name,
     [string] $Description = "Lab group"
   )
-  # Lookup by CN
   $g = Get-ADGroup -LDAPFilter "(cn=$Name)" -ErrorAction SilentlyContinue
   if (-not $g) {
     if ($CreateMissingGroups) {
@@ -83,7 +94,7 @@ function New-RandomPassword {
   (-join ($lower+$upper+$digit+$sym+$rest).ToCharArray() | Sort-Object {Get-Random}) -replace '\s',''
 }
 
-# Some name pools for generator mode
+# Pools de nombres (puedes migrarlos a data\ si querés)
 $FirstNames = @(
   'Alice','Bob','Carol','David','Eve','Frank','Grace','Heidi','Ivan','Judy',
   'Kathy','Leo','Mallory','Niaj','Olivia','Peggy','Quinn','Ruth','Sybil','Trent',
@@ -118,7 +129,7 @@ function New-RandomUserObject {
 
 function Get-UniqueSamAndUpn {
   param(
-    [Parameter(Mandatory)][string] $BaseSam,  # e.g., jsmith
+    [Parameter(Mandatory)][string] $BaseSam,
     [Parameter(Mandatory)][string] $Domain
   )
   $sam = $BaseSam
@@ -179,12 +190,11 @@ function Create-ADUser {
       -WhatIf:$WhatIf `
       -ErrorAction Stop
 
-    # Add group memberships
+    # Membresías de grupo
     if ($groups) {
       foreach ($g in $groups) {
         $groupName = if ($g -is [string]) { $g } else { $g.Name }
         if ([string]::IsNullOrWhiteSpace($groupName)) { continue }
-
         $adGroup = Ensure-ADGroup -Name $groupName
         if ($adGroup) {
           try {
@@ -205,8 +215,8 @@ function Create-ADUser {
       }
     }
 
-    # Log to CSV (TempPassword for lab convenience)
-    $dn = if ($newUser) { $newUser.DistinguishedName } else { "" }  # empty under -WhatIf
+    # Log CSV
+    $dn = if ($newUser) { $newUser.DistinguishedName } else { "" }
     $grpText = ($groups | ForEach-Object { if ($_ -is [string]) { $_ } else { $_.Name } }) -join ';'
     $line = '"{0}","{1}","{2}","{3}","{4}","{5}"' -f `
             $name, $samAccountName, $upn, $dn, $password, $grpText
@@ -218,20 +228,24 @@ function Create-ADUser {
   }
 }
 
-# ── JSON mode ────────────────────────────────────────────────────────────────
+# ===== Modo JSON ==============================================================
 if ($PSCmdlet.ParameterSetName -eq "json") {
   $json   = Get-Content -Raw $JSONFile | ConvertFrom-Json
   $domain = $json.domain
   if (-not $domain) { throw "JSON missing 'domain' field" }
-  if ($json.ou) { $OU = $json.ou }
 
+  # OU: del JSON o default a OU=Lab Users,<DN del dominio>
+  if ($json.ou) { 
+    $OU = $json.ou 
+  } elseif (-not $OU) {
+    $OU = "OU=Lab Users,$((Get-ADDomain).DistinguishedName)"
+  }
+
+  # Crear grupos del JSON si existen
   if ($CreateMissingGroups -and $json.groups) {
     foreach ($g in $json.groups) {
-      # Support string or object with Name/Description
-      if ($g -is [string]) {
-        $name = $g
-        $desc = 'Lab group'
-      } else {
+      if ($g -is [string]) { $name = $g; $desc = 'Lab group' }
+      else {
         $name = $g.Name
         $desc = $g.Description
         if ([string]::IsNullOrWhiteSpace($desc)) { $desc = 'Lab group' }
@@ -239,6 +253,10 @@ if ($PSCmdlet.ParameterSetName -eq "json") {
       if ([string]::IsNullOrWhiteSpace($name)) { Write-Warning "Skipping a group with no name."; continue }
       Ensure-ADGroup -Name $name -Description $desc | Out-Null
     }
+  }
+  # Si el JSON no define groups a nivel raíz y tenemos archivo, pre-crear esos también
+  if ($CreateMissingGroups -and (-not $json.groups) -and $fileGroups.Count -gt 0) {
+    foreach ($g in $fileGroups) { Ensure-ADGroup -Name $g | Out-Null }
   }
 
   foreach ($u in $json.users) {
@@ -250,13 +268,28 @@ if ($PSCmdlet.ParameterSetName -eq "json") {
       Title      = $u.title
       Groups     = $u.groups
     }
+
+    # Si este usuario no trae grupos → asignar aleatorios desde archivo/fallback
+    if (-not $userObject.Groups -or $userObject.Groups.Count -eq 0) {
+      $pool = if ($fileGroups.Count -gt 0) { $fileGroups } else { @('IT','HR','Finance','Sales') }
+      $userObject.Groups = Get-RandomGroups -Pool $pool -Min 1 -Max ([Math]::Min(3, $pool.Count))
+    }
+
     Create-ADUser -UserObject $userObject -Domain $domain -OU $OU
   }
   return
 }
 
-# ── Generator mode ───────────────────────────────────────────────────────────
-# Pre-create groups if asked
+# ===== Modo Generador =========================================================
+# Domain/OU por defecto si faltan (solo por seguridad)
+if (-not $OU) { $OU = "OU=Lab Users,$((Get-ADDomain).DistinguishedName)" }
+
+# Si no pasaron -GroupNames, usar archivo o fallback
+if (-not $GroupNames -or $GroupNames.Count -eq 0) {
+  $GroupNames = if ($fileGroups.Count -gt 0) { $fileGroups } else { @('IT','HR','Finance','Sales') }
+}
+
+# Pre-crear grupos si se pidió
 if ($CreateMissingGroups -and $GroupNames.Count -gt 0) {
   foreach ($g in $GroupNames) { Ensure-ADGroup -Name $g | Out-Null }
 }
@@ -265,4 +298,3 @@ if ($CreateMissingGroups -and $GroupNames.Count -gt 0) {
   $u = New-RandomUserObject -PossibleGroups $GroupNames -Domain $Domain
   Create-ADUser -UserObject $u -Domain $Domain -OU $OU
 }
-
