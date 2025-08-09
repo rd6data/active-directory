@@ -10,3 +10,8 @@
 ```shell
 Install-WindowsFeature AD-Domain-Services -IncludeManagementTools
 ```
+
+```
+
+Get-NetIPAddress
+```

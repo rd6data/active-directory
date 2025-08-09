@@ -1,0 +1,34 @@
+{   
+
+    "domain": "labs.com",
+    "ou": "OU=Lab Users,DC=labs,DC=com",
+    "groups": [
+        {
+            "name": "Employees"
+        }
+    ],
+    
+    "users": [
+        {
+            "name": "Alice Lice",
+            "password": "P@ssword789",
+            "groups": [
+                "Employees"
+            ]
+        },
+        {
+            "name": "Bob Smith",
+            "password": "P@ssword123",
+            "groups": [
+                "Employees"
+            ]
+        },
+        {
+            "name": "Charlie Brown",
+            "password": "P@ssword456",
+            "groups": [
+                "Employees"
+            ]
+        }
+    ]
+}
